@@ -68,6 +68,7 @@ class FFCP2(object):
 		self.upload = None  # dict(path, size, data) while M28 is open
 		self.sd = None  # dict(path, pos, total) for the current SD print
 		self.light = None
+		self.path = []  # (x0, y0, z0, x1, y1, z1, tool, extruding) for every G0/G1 that moved
 		self.disconnected = False
 		self._t = time.monotonic()
 
@@ -167,7 +168,7 @@ class FFCP2(object):
 		code = parts[0]
 		args = {}
 		for p in parts[1:]:
-			args[p[:1].upper()] = p[1:]
+			args[p[:1].decode("ascii", "replace").upper()] = p[1:]
 
 		if code == b"M601":
 			self.control = True
@@ -242,9 +243,26 @@ class FFCP2(object):
 					b"Tool Count: 2")
 
 	def _G1(self, code, line, args):
+		start = (self.pos["X"], self.pos["Y"], self.pos["Z"])
 		for axis in ("X", "Y", "Z"):
 			if axis in args:
 				self.pos[axis] = self._num(args, axis)
+		extruding = False
+		if "E" in args:
+			key = "A" if self.tool == 0 else "B"
+			e = self._num(args, "E")
+			extruding = e > self.pos[key]  # [guess] absolute E, as FlashPrint emits
+			self.pos[key] = e
+		end = (self.pos["X"], self.pos["Y"], self.pos["Z"])
+		if end != start:
+			self.path.append(start + end + (self.tool, extruding))
+		self._reply(code)
+
+	def _G28(self, code, line, args):
+		self.pos.update(X=0.0, Y=0.0, Z=0.0)  # [guess] center-origin bed, Z homes to the nozzle
+		self._reply(code)
+
+	def _G92(self, code, line, args):
 		if "E" in args:
 			self.pos["A" if self.tool == 0 else "B"] = self._num(args, "E")
 		self._reply(code)
