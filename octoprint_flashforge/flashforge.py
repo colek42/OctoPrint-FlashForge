@@ -315,7 +315,8 @@ class FlashForge(object):
 		data_len = len(data)
 
 		# strip carriage return, etc so we can terminate lines the FlashForge way
-		data = data.strip(b" \r\n")
+		# drop any ;comment too: the firmware echoes a commented line, never runs it and never sends an ok
+		data = data.split(b";", 1)[0].strip(b" \r\n")
 
 
 		# try to filter out garbage commands (we need to replace with something harmless)

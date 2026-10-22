@@ -37,6 +37,14 @@ def test_non_utf8_command_does_not_leak_write_lock(transport, sim):
 	assert finishes(lambda: transport.write(b"M105\n"))
 
 
+def test_inline_comment_still_gets_an_ok(transport, sim):
+	# the firmware echoes a line with a ;comment, never runs it and never answers ok, stalling OctoPrint
+	transport.write(b"M601 S0\n")
+	read_until(transport, b"ok")
+	transport.write(b"M105 ; poll\n")
+	assert any(l.startswith(b"T0:") for l in read_until(transport, b"T0:"))
+
+
 def upload(plugin, tmp_path, name="cube.gx", body=b"G1 X1\n" * 3000):
 	src = tmp_path / name
 	src.write_bytes(body)

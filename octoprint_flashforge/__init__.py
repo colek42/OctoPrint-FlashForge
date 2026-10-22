@@ -228,6 +228,13 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 		return "ff" in profile and "noG91" in profile["ff"] and profile["ff"]["noG91"]
 
 
+	@staticmethod
+	def _temp_params(cmd):
+		"""Return (target, tool) from a Marlin M109/M190: S or R is the target, T the tool; None when absent."""
+		params = dict(re.findall(r"\b([SRT])(-?\d+(?:\.\d+)?)", cmd))
+		return params.get("S", params.get("R")), params.get("T")
+
+
 	# Called when gcode commands are being placed in the queue by OctoPrint:
 	# Mostly important for control panel or translating and printing non FlashPrint file directly from OctoPrint
 	def rewrite_gcode(self, comm_instance, phase, cmd, cmd_type, gcode, *args, **kwargs):
@@ -246,7 +253,9 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 			# TODO: filter M146 and other commands? when printing from SD because they cause comms to hang
 
 			# allow a very limited set of commands while printing from SD to minimize problems...
-			if self._serial_obj.is_sd_printing() and gcode not in ["M24", "M25", "M26", "M27", "M105", "M110", "M112", "M114", "M115", "M117", "M400"]:
+			# queued commands (eg M117, M400) are dropped by the firmware during an SD print without an ok,
+			# which stalls OctoPrint, so only immediate ones get through
+			if self._serial_obj.is_sd_printing() and gcode not in ["M24", "M25", "M26", "M27", "M105", "M110", "M112", "M114", "M115"]:
 				cmd = []
 
 			# homing
@@ -316,9 +325,16 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 			elif cmd == "M108":
 				cmd = []
 
-			# M109 in Marlin = wait for extruder temp : M6 in FlashForge (this may need to be moved to the write() method)
+			# M109 in Marlin = set extruder temp and wait. FlashForge M6 only waits (it ignores S and T), so set the
+			# target with M104 first. A bare M109 T1/T2 is FlashPrint's IDEX mirror/duplicate marker, which the
+			# firmware only honours inside SD files: send the park script it would run (canned scripts 0x11/0x12).
 			elif gcode == "M109":
-				cmd = [cmd.replace("M109", "M6")]
+				target, tool = self._temp_params(cmd)
+				if target is None and tool in ("1", "2"):
+					cmd = ["M110 T1", "G1 X-66 F7000", "M110 T0", "G1 X66 F7000", "M111 T" + tool]
+				else:
+					on_tool = " T" + tool if tool is not None else ""
+					cmd = (["M104 S%s%s" % (target, on_tool)] if target is not None else []) + ["M6" + on_tool]
 
 			# M110 is sent by OctoPrint as default hello but also when connected:
 			# M110 Set line number/hello in Marlin : FlashForge uses M601 S0 to take control via USB
@@ -342,9 +358,10 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 			elif gcode == "M146" and self._serial_obj.is_sd_printing():
 				cmd = []
 
-			# M190 in Marlin = wait for bed temp : M7 in FlashForge
+			# M190 in Marlin = set bed temp and wait : M7 in FlashForge only waits, so set the target with M140 first
 			elif gcode == "M190":
-				cmd = [cmd.replace("M190", "M7")]
+				target, _ = self._temp_params(cmd)
+				cmd = (["M140 S%s" % target] if target is not None else []) + ["M7"]
 
 			# Tx = select extruder : FlashForge uses M108
 			elif gcode == "T":
