@@ -271,7 +271,11 @@ class FFCP2(object):
 
 	def _M28(self, code, line, args):
 		parts = line.split(None, 2)
-		size, path = int(parts[1]), parts[2].decode("utf-8", "replace") if len(parts) > 2 else ""
+		try:
+			size, path = int(parts[1]), parts[2].decode("utf-8", "replace") if len(parts) > 2 else ""
+		except (IndexError, ValueError):
+			# eg Marlin's "M28 name.gco" from OctoPrint 2.0's own streaming upload [guess: refused like a bad path]
+			size, path = 0, line.split(None, 1)[1].decode("utf-8", "replace") if b" " in line else ""
 		if not path.startswith(self.sd_drive + "/user/"):
 			return self._reply(code, b"open failed, File: %s." % path.encode())  # [log] issue #78
 		self.upload = dict(path=path, size=size, data=b"")

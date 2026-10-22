@@ -14,7 +14,7 @@ def test_handshake_and_temperature(transport, sim):
 	transport.write(b"M601 S0\n")
 	assert any(b"Control Success." in l for l in read_until(transport, b"ok"))
 	transport.write(b"M105\n")
-	assert any(l.startswith(b"T0:") for l in read_until(transport, b"T0:"))
+	assert any(b"T0:" in l for l in read_until(transport, b"T0:"))
 
 
 def test_non_utf8_reply_does_not_wedge_reads(transport, sim):
@@ -37,12 +37,23 @@ def test_non_utf8_command_does_not_leak_write_lock(transport, sim):
 	assert finishes(lambda: transport.write(b"M105\n"))
 
 
+def test_polled_temperatures_arrive_on_the_ok_line(transport, sim):
+	# OctoPrint reads a temperature line that does not start with "ok" as a firmware heat-up report
+	# (comm.py "Externally triggered heatup detected"), so a plain M105 poll must look like Marlin's "ok T0:..."
+	transport.write(b"M601 S0\n")
+	read_until(transport, b"ok")
+	transport.write(b"M105\n")
+	lines = read_until(transport, b"T0:")
+	temp_lines = [l for l in lines if b"T0:" in l]
+	assert temp_lines and all(l.startswith(b"ok") for l in temp_lines), lines
+
+
 def test_inline_comment_still_gets_an_ok(transport, sim):
 	# the firmware echoes a line with a ;comment, never runs it and never answers ok, stalling OctoPrint
 	transport.write(b"M601 S0\n")
 	read_until(transport, b"ok")
 	transport.write(b"M105 ; poll\n")
-	assert any(l.startswith(b"T0:") for l in read_until(transport, b"T0:"))
+	assert any(b"T0:" in l for l in read_until(transport, b"T0:"))
 
 
 def upload(plugin, tmp_path, name="cube.gx", body=b"G1 X1\n" * 3000):

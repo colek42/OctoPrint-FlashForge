@@ -6,6 +6,7 @@ Every test also requires octoprint.log to stay free of errors and tracebacks.
 
 import time
 
+import pytest
 from conftest import wait_for
 
 from ffsim.__main__ import demo_gcode
@@ -81,8 +82,20 @@ def test_line_noise_does_not_wedge_a_print(rig):
 	assert not [p for p in rig.problems() if "Traceback" in p], rig.problems()[:20]
 
 
+def _octoprint_major():
+	import octoprint
+	return int(octoprint.__version__.split(".")[0])
+
+
+@pytest.mark.xfail(_octoprint_major() >= 2, strict=True,
+				   reason="OctoPrint 2.0.0rc7 never calls the octoprint.printer.sdcardupload hook (only the dead "
+						  "add_sd_file does) and streams Marlin M28 instead, which this printer refuses")
 def test_sd_upload_lands_on_drive_1_and_prints(rig):
-	rig.upload("cube.gcode", SMALL_JOB, location="sdcard")
+	# 2.0 renamed the storage to "printer" and (as of 2.0.0rc7) no longer accepts "sdcard", despite documenting
+	# pre-2.0 behaviour for requests without an API version header; see docs/octoprint-2.0-sdcard-regression.md
+	import octoprint
+	storage = "printer" if int(octoprint.__version__.split(".")[0]) >= 2 else "sdcard"
+	rig.upload("cube.gcode", SMALL_JOB, location=storage)
 	wait_for(lambda: "1:/user/cube.gcode" in rig.sim()["files"], 120, what="the file on the printer's SD card")
 	wait_for(lambda: rig.sim()["machine"] == "BUILDING_FROM_SD", 60, what="the printer to start the SD print")
 	finish(rig)

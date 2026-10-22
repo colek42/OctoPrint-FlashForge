@@ -37,6 +37,8 @@ class FlashForge(object):
 
 	PRINTING_STATES = [STATE_BUILDING, STATE_SD_BUILDING, STATE_SD_PAUSED]
 
+	regex_M105_ok = re.compile(rb"(T0:[^\r\n]*)\r?\nok")
+	""" Regex matching an M105 temperature line followed by its ok. """
 	regex_SDPrintProgress = re.compile(b"(?P<current>[0-9]+)/(?P<total>[0-9]+)")
 	""" Regex matching SD print progress from M27. """
 	regex_gcode = re.compile(rb"^(N[0-9]+\s+)?(?P<gcode>[GM][0-9]+)(\s+(?P<payload>.+))?")
@@ -492,6 +494,10 @@ class FlashForge(object):
 					if not (b"CMD " in data and self._printerstate in [self.STATE_SD_BUILDING, self.STATE_SD_PAUSED]):
 						# do not drop the "ok" if there is the response to another command in here and we are printing from SD?
 						data = data.replace(b"\r\nok", b"")
+				else:
+					# answer a poll the way Marlin does, "ok T0:..". OctoPrint reads a temperature line that does not
+					# start with ok as a firmware heat-up report and flags an external heatup on every poll.
+					data = FlashForge.regex_M105_ok.sub(rb"ok \1", data)
 				self._is_autotemp = False
 
 			elif b"CMD M114 " in data:

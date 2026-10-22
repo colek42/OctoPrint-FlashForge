@@ -8,6 +8,14 @@ def send(sim, line):
 	sim.bulk_write(ffsim.CMD_OUT, b"~%s\r\n" % line)
 
 
+def test_marlin_style_m28_is_refused_not_raised():
+	# OctoPrint 2.0 streams "M28 name.gco" itself when it bypasses the plugin's upload hook
+	sim = ffsim.FFCP2()
+	send(sim, b"M601 S0")
+	send(sim, b"M28 cube.gco")
+	assert b"open failed" in bytes(sim.out)
+
+
 def test_parameters_reach_state():
 	sim = ffsim.FFCP2()
 	send(sim, b"M601 S0")
