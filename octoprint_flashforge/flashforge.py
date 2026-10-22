@@ -11,6 +11,12 @@ from octoprint.settings import settings
 from octoprint.events import Events, eventManager
 
 
+def connection_settings_path():
+	"""Serial settings live under "serial" in OctoPrint 1.x and under the serial_connector plugin from 2.0."""
+	from octoprint.settings import default_settings
+	return ["serial"] if "serial" in default_settings else ["plugins", "serial_connector"]
+
+
 class FlashForgeError(Exception):
 	def __init__(self, message, error=0):
 		super(FlashForgeError, self).__init__(("{} ({})" if error else "{}").format(message, error))
@@ -538,7 +544,7 @@ class FlashForge(object):
 					# (unless printer reports autotemp) so OctoPrint sees something.
 					# TODO: use OctoPrint state instead to decide when to do the temp check - ie if printing and temp wait
 					if self._printerstate == self.STATE_WAIT_ON_TEMP and self._autotemp_enabled:
-						self._temp_interval = settings().getFloat(["serial", "timeout", "temperatureAutoreport"])
+						self._temp_interval = settings().getFloat(connection_settings_path() + ["timeout", "temperatureAutoreport"])
 					else:
 						self._temp_interval = 0.0
 					# TODO: if we just connected and the printer is printing from SD then trigger an M27 to get

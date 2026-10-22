@@ -72,7 +72,13 @@ def prepare(basedir):
 	config.setdefault("server", {}).update(firstRun=False, onlineCheck={"enabled": False},
 										   pluginBlacklist={"enabled": False})
 	config.setdefault("printerProfiles", {})["default"] = "creator_pro_2"
-	config.setdefault("serial", {}).update(port=PORT_NAME, autoconnect=True)
+	import octoprint
+	if int(octoprint.__version__.split(".")[0]) >= 2:
+		# 2.0 connects through connector plugins; the preferred connection replaces serial.port/autoconnect
+		config["printerConnection"] = {"autoconnect": True, "preferred": {
+			"connector": "serial", "parameters": {"port": PORT_NAME, "baudrate": None}}}
+	else:
+		config.setdefault("serial", {}).update(port=PORT_NAME, autoconnect=True)
 	config.setdefault("plugins", {}).setdefault("tracking", {})["enabled"] = False
 	with open(config_path, "w") as f:
 		yaml.safe_dump(config, f)

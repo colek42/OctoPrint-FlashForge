@@ -58,22 +58,33 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 		self._conn_settings = {
 			'firmwareDetection': False,				# do not try to auto detect firmware
 			'sdAlwaysAvailable': True,				# FF printers always(?) have the internal SD card available
-			'neverSendChecksum': True,				# FF protocol does not use command checksums
 			'helloCommand': "M601 S0",				# FF hello command and set communication to USB
 			'abortHeatupOnCancel': False			# prevent sending of M108 command which doesn't work
 		}
-		self._feature_settings = {
-			'autoUppercaseBlacklist': ['M146']		# LED control requires lowercase r,g,b
-		}
+		# FF protocol does not use command checksums. OctoPrint 2.0 moved the serial settings into the
+		# serial_connector plugin and turned neverSendChecksum into sendChecksum, and renamed the uppercase list.
+		one_x = "serial" in default_settings
+		if one_x:
+			conn_path, uppercase_key = ["serial"], "autoUppercaseBlacklist"
+			self._conn_settings["neverSendChecksum"] = True
+		else:
+			conn_path, uppercase_key = ["plugins", "serial_connector"], "autoUppercaseBlocklist"
+			self._conn_settings["sendChecksum"] = "never"
 
-		for setting in self._conn_settings.keys():
-			octoprint.settings.settings().set(['serial', setting], self._conn_settings[setting])
+		s = octoprint.settings.settings()
+		# force: in 2.0 the serial_connector defaults may not be registered yet when this runs, and set() silently
+		# drops a value for a path without a known default
+		for setting, value in self._conn_settings.items():
+			s.set(conn_path + [setting], value, force=True)
 
-		for setting in self._feature_settings.keys():
-			octoprint.settings.settings().set(["feature", setting], self._feature_settings[setting])
+		# LED control requires lowercase r,g,b; add M146 to OctoPrint's list rather than replacing its defaults
+		uppercase_path = ["feature", uppercase_key]
+		blocked = list(s.get(uppercase_path) or [])
+		if "M146" not in blocked:
+			s.set(uppercase_path, blocked + ["M146"], force=True)
 
-		default_settings["serial"] = dict_merge(default_settings["serial"], self._conn_settings)
-		default_settings["feature"] = dict_merge(default_settings["feature"], self._feature_settings)
+		if one_x:
+			default_settings["serial"] = dict_merge(default_settings["serial"], self._conn_settings)
 
 		self._logger.info("libusb1: {}".format(usb1.__version__))
 
