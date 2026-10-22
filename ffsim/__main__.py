@@ -88,11 +88,23 @@ def main():
 	parser.add_argument("--port", type=int, default=5005)
 	parser.add_argument("--viz-port", type=int, default=5099)
 	parser.add_argument("--basedir", default=os.path.expanduser("~/.ffsim-octoprint"))
-	parser.add_argument("--heat-rate", type=float, default=15.0, help="degrees C per second")
+	parser.add_argument("--heat-rate", type=float, default=15.0, help="degrees C per second (hand model)")
+	parser.add_argument("--backend", choices=("hand", "firmware"), default="hand",
+						help="hand: the Python model in ffsim/__init__.py; firmware: the stock image in the "
+							 "emulator (needs --firmware or FFSIM_FIRMWARE)")
+	parser.add_argument("--firmware", help="path to creatorp2_v1.8_20210221.bin (never commit it)")
+	parser.add_argument("--plant", help="JSON/YAML file overriding ffsim/firmware/plant.py PlantParams")
 	args = parser.parse_args()
 
 	prepare(args.basedir)
-	sim = ffsim.FFCP2(heat_rate=args.heat_rate)
+	if args.backend == "firmware":
+		from ffsim.firmware.backend import FirmwareFFCP2
+		from ffsim.firmware.plant import PlantParams
+		params = PlantParams.load(args.plant) if args.plant else None
+		print("booting the stock firmware in the emulator...")
+		sim = FirmwareFFCP2(args.firmware, params=params, realtime=True)
+	else:
+		sim = ffsim.FFCP2(heat_rate=args.heat_rate)
 	ffsim.install(sim)
 	viz.serve(sim, args.viz_port)
 	print("3D view: http://127.0.0.1:%d   OctoPrint: http://127.0.0.1:%d (sim / sim)" % (args.viz_port, args.port))

@@ -15,3 +15,7 @@
 .venv/
 *.egg-info/
 __pycache__/
+# vendor firmware images and RE artefacts stay out of this public repo
+*.bin
+*.gpr
+*.rep/

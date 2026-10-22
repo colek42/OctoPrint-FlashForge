@@ -53,9 +53,16 @@ class FakePlugin(object):
 		self.connected = None
 
 
-@pytest.fixture
-def sim():
-	printer = ffsim.FFCP2()
+@pytest.fixture(params=["hand", "firmware"])
+def sim(request):
+	"""The hand-written model, and the real stock firmware in the emulator (FFSIM_FIRMWARE)."""
+	if request.param == "firmware":
+		if not os.environ.get("FFSIM_FIRMWARE"):
+			pytest.skip("FFSIM_FIRMWARE not set")
+		from ffsim.firmware.backend import FirmwareFFCP2
+		printer = FirmwareFFCP2()
+	else:
+		printer = ffsim.FFCP2()
 	undo = ffsim.install(printer)
 	yield printer
 	undo()

@@ -26,6 +26,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px/1.
 <div><span class="k">tool</span> <span id="tool">-</span></div>
 <div><span class="t0">T0</span> <span id="t0">-</span> &nbsp;<span class="t1">T1</span> <span id="t1">-</span> &nbsp;<span class="k">bed</span> <span id="bed">-</span></div>
 <div><span class="k">segments</span> <span id="segs">0</span></div>
+<div><span class="k">lost steps</span> <span id="lost">-</span></div>
 <label><input type="checkbox" id="travel"> show travel moves</label>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -75,6 +76,7 @@ async function poll(){try{const r=await fetch('/state?since='+since);const s=awa
  const t=s.temps;document.getElementById('t0').textContent=t.T0.join('/');document.getElementById('t1').textContent=t.T1.join('/');
  document.getElementById('bed').textContent=t.B.join('/');document.getElementById('tool').textContent='T'+s.tool;
  document.getElementById('state').textContent=s.machine+' / '+s.move;document.getElementById('segs').textContent=since;
+ document.getElementById('lost').textContent=Object.entries(s.lost_steps||{}).filter(e=>e[1]).map(e=>e[0]+':'+e[1]).join(' ')||'none';
 }catch(e){document.getElementById('state').textContent='simulator offline'}setTimeout(poll,100)}
 poll();
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
@@ -87,11 +89,15 @@ def snapshot(sim, since):
 	with sim.lock:
 		segments = sim.path[since:]
 		pos = sim.pos
-		heads = []
-		for tool in (0, 1):
-			x = pos["X"] if tool == sim.tool else PARK_X[tool]
-			heads.append([x, pos["Y"], pos["Z"]])
+		heads = getattr(sim, "heads", None)  # the firmware backend knows where both carriages really are
+		if heads is None:
+			heads = []
+			for tool in (0, 1):
+				x = pos["X"] if tool == sim.tool else PARK_X[tool]
+				heads.append([x, pos["Y"], pos["Z"]])
 		return dict(
+			lost_steps=getattr(sim, "lost_steps", {}),
+			following_error_max={k: round(v, 3) for k, v in getattr(sim, "following_error_max", {}).items()},
 			segments=segments,
 			next=since + len(segments),
 			heads=heads,
