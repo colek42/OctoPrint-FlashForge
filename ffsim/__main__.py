@@ -15,7 +15,7 @@ import sys
 import yaml
 
 import ffsim
-from ffsim import viz
+from ffsim import faults, viz
 
 PORT_NAME = "FlashForge Creator Pro 2 (sim), port:1:7"  # what the plugin's detect_printer() lists
 
@@ -87,6 +87,7 @@ def main():
 	parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
 	parser.add_argument("--port", type=int, default=5005)
 	parser.add_argument("--viz-port", type=int, default=5099)
+	parser.add_argument("--control-port", type=int, default=5098, help="fault injection, see ffsim/faults.py")
 	parser.add_argument("--basedir", default=os.path.expanduser("~/.ffsim-octoprint"))
 	parser.add_argument("--heat-rate", type=float, default=15.0, help="degrees C per second (hand model)")
 	parser.add_argument("--backend", choices=("hand", "firmware"), default="hand",
@@ -105,7 +106,9 @@ def main():
 		sim = FirmwareFFCP2(args.firmware, params=params, realtime=True)
 	else:
 		sim = ffsim.FFCP2(heat_rate=args.heat_rate)
-	ffsim.install(sim)
+	link = faults.Faults(sim)  # the plugin talks to the printer through injectable cable/USB faults
+	ffsim.install(link)
+	faults.serve(link, args.control_port)
 	viz.serve(sim, args.viz_port)
 	print("3D view: http://127.0.0.1:%d   OctoPrint: http://127.0.0.1:%d (sim / sim)" % (args.viz_port, args.port))
 
