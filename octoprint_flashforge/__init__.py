@@ -36,7 +36,7 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 			0x0004: {"name": "Guider II"}, 0x0005: {"name": "Inventor"},
 			0x0007: {"name": "Finder v2", "noG28XY": True, "noM132": True},
 			0x0009: {"name": "Guider IIs"}, 0x000A: {"name": "Dreamer NX"},
-			0x000e: {"name": "Creator Pro 2"},
+			0x000e: {"name": "Creator Pro 2", "sdDrive": "1:"},
 			0x00e7: {"name": "Creator Max"}, 0x00ee: {"name": "Finder v2.12"},
 			0x00f6: {"name": "PowerSpec Ultra 3DPrinter (B)"},
 			0x00ff: {"name": "PowerSpec Ultra 3DPrinter (A)"}}}
@@ -382,27 +382,27 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 
 			# there must be something coming back from the printer (eg keep alive) or we will block here until the
 			# Octoprint comm monitor readline times out
-			self._serial_obj.makeexclusive(True)
-			self._serial_obj.enable_keep_alive(False)
-
-			# make sure heaters are off
-			ok, answer = self._serial_obj.sendcommand(b"M104 S0 T0")
-			if not ok:
-				error = "{}: {}".format(errormsg, answer)
-				errormsg += " - printer busy."
-			else:
-				self._serial_obj.sendcommand(b"M104 S0 T1")
-				self._serial_obj.sendcommand(b"M140 S0")
-
-				ok, answer = self._serial_obj.sendcommand(b"M28 %d 0:/user/%s" % (file_size, remote_name.encode()), 5000)
-				if not ok or b"open failed" in answer:
+			serial_obj = self._serial_obj  # on_disconnect() may clear self._serial_obj mid-upload
+			serial_obj.makeexclusive(True)
+			serial_obj.enable_keep_alive(False)
+			try:
+				# make sure heaters are off
+				ok, answer = serial_obj.sendcommand(b"M104 S0 T0")
+				if not ok:
 					error = "{}: {}".format(errormsg, answer)
-					errormsg += " - could not create file on printer SD card."
+					errormsg += " - printer busy."
+				else:
+					serial_obj.sendcommand(b"M104 S0 T1")
+					serial_obj.sendcommand(b"M140 S0")
 
-			if not error:
-				self._logger.debug("M28 file tx started")
+					ok, answer = serial_obj.sendcommand(b"M28 %d %s" % (file_size, remote_path.encode()), 5000)
+					if not ok or b"open failed" in answer:
+						error = "{}: {}".format(errormsg, answer)
+						errormsg += " - could not create file on printer SD card."
 
-				try:
+				if not error:
+					self._logger.debug("M28 file tx started")
+
 					chunk_start_index = 0
 					while chunk_start_index < file_size:
 						chunk_end_index = min(chunk_start_index + self.FILE_PACKET_SIZE, file_size)
@@ -411,7 +411,7 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 							error = "unexpected eof"
 							break
 
-						if self._serial_obj.writeraw(chunk, False):
+						if serial_obj.writeraw(chunk, False):
 							upload_percent = int(100.0 * chunk_end_index / file_size)
 							self._logger.debug("Sent: %d%% %d/%d" % (upload_percent, chunk_end_index, file_size))
 						else:
@@ -421,31 +421,33 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 						chunk_start_index += self.FILE_PACKET_SIZE
 
 					if not error:
-						result, response = self._serial_obj.sendcommand(b"M29", 10000)
+						result, response = serial_obj.sendcommand(b"M29", 10000)
 						if result and b"CMD M28" in response:
-							response = self._serial_obj.readraw(1000)
-						if result and b"failed" not in response:
-							sd_upload_succeeded(filename, remote_name, timer()-start)
-						else:
+							response = serial_obj.readraw(1000)
+						if not (result and b"failed" not in response):
 							error = "file transfer incomplete"
 
-				except flashforge.FlashForgeError:
-					error = "file transfer incomplete"
+					if error:
+						errormsg = "{} - {}.".format(errormsg, error)
 
-				errormsg = "{} - {}.".format(errormsg, error)
+			except flashforge.FlashForgeError as fferror:
+				# a USB error anywhere above used to kill this thread with both connection locks held
+				error = str(fferror)
+				errormsg += " - lost connection to printer."
+
+			finally:
+				serial_obj.makeexclusive(False)
+				serial_obj.enable_keep_alive(True)
 
 			if error:
 				self._logger.info("Upload failed: {}".format(error))
 				sd_upload_failed(filename, remote_name, timer()-start)
-				self._serial_obj.makeexclusive(False)
-				self._serial_obj.enable_keep_alive(True)
 				eventManager().fire(Events.ERROR, {"error": errormsg, "reason": "start_print"})
 				return
 
-			self._serial_obj.makeexclusive(False)
-			self._serial_obj.enable_keep_alive(True)
+			sd_upload_succeeded(filename, remote_name, timer()-start)
 			# NB M23 select will also trigger a print on FlashForge
-			self._comm.selectFile("0:/user/%s\r\n" % remote_name, True)
+			self._comm.selectFile("%s\r\n" % remote_path, True)
 			# TODO: need to set the correct file size for the progress indicator
 
 
@@ -457,6 +459,8 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 		bgcode = b""
 		file_size = 0
 		remote_name = filename.split("/")[-1]
+		# the Creator Pro 2 keeps user files on drive 1: (firmware string "1:/user/%s"); older models use 0:
+		remote_path = "%s/user/%s" % (self._printer_profile.get("sdDrive", "0:"), remote_name)
 
 		self._logger.info("Starting SDCard upload from {} to {}".format(filename, remote_name))
 		sd_upload_started(filename, remote_name)

@@ -12,3 +12,6 @@
 *.egg-info
 *.orig
 *.codekit
+.venv/
+*.egg-info/
+__pycache__/
