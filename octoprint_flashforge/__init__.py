@@ -103,6 +103,12 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 		)
 
 
+	##~~ TemplatePlugin mixin
+	def is_template_autoescaped(self):
+		# no Jinja templates are shipped, so opting in to OctoPrint 1.13's enforced autoescaping changes nothing
+		return True
+
+
 	##~~ Softwareupdate hook
 	def get_update_information(self):
 		# Plugin specific configuration to use with the Software Update Plugin.
@@ -114,12 +120,12 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 
 				# version check: github repository
 				type="github_release",
-				user="Mrnt",
+				user="colek42",
 				repo="OctoPrint-FlashForge",
 				current=self._plugin_version,
 
 				# update method: pip
-				pip="https://github.com/Mrnt/OctoPrint-FlashForge/archive/{target_version}.zip"
+				pip="https://github.com/colek42/OctoPrint-FlashForge/archive/{target_version}.zip"
 			)
 		)
 
