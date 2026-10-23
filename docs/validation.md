@@ -25,3 +25,14 @@ thermal model, SD upload on hardware, IDEX duplicate/mirror, tool changes.
 
 Raw data (not committed, on the owner's Mac): `~/Documents/octopi-backup/test_square_temps.csv`
 (2 s samples of all temperatures and targets through the job) and `test_square.gcode`.
+
+## 2026-10-22: first SD-card upload attempt (plugin 0.2.8)
+
+| What | Real printer | Twin before this | Verdict |
+|---|---|---|---|
+| `M28 <size> 1:/user/square_sd.g` | `Disk read error.` (no readable card in the printer, owner to confirm) | hand model had no "no card" state | added to the hand model (`sd_card=False`) |
+| `M29` with no file open | `Done saving file.` | emulated firmware: same (finding #10); hand model said `File error` | hand model corrected |
+| `M23 1:/user/square_sd.g` | `Disk read error.` | n/a | added |
+| 8 KB of file bytes sent with no file open | firmware parsed them as commands; USB writes then timed out (`LIBUSB_ERROR_TIMEOUT`) and the printer refused USB until power-cycled | decompile: file bytes share the command OUT callback, 128-byte ring | hand model now wedges after 128 stray bytes |
+
+Plugin fix (0.2.9): an upload proceeds only on `Writing to file`; a disk error says to check for an SD card.

@@ -4,6 +4,8 @@ import os
 import threading
 import warnings
 
+import pytest
+
 from conftest import finishes, read_until
 
 import ffsim
@@ -86,6 +88,21 @@ def test_sd_upload_uses_ffcp2_drive(transport, sim, tmp_path):
 	assert "ok" in result, result
 	assert "1:/user/cube.gx" in sim.files
 	assert transport._comm.selected.startswith("1:/user/cube.gx")
+
+
+def test_upload_without_sd_card_stops_before_sending_data(transport, sim, tmp_path):
+	# Real printer, 2026-10-22: M28 answered "Disk read error.", the plugin sent the file anyway, the firmware
+	# parsed it as commands and stopped accepting USB writes until it was power-cycled.
+	if not hasattr(sim, "sd_card"):
+		pytest.skip("hand model only: needs the no-card switch")
+	sim.sd_card = False
+	transport.write(b"M601 S0\n")
+	read_until(transport, b"ok")
+	result = upload(make_plugin(transport), tmp_path)
+	assert "failed" in result and "ok" not in result, result
+	assert sim.stray_sd_bytes == 0, "file bytes were sent although the printer never opened the file"
+	transport.write(b"M105\n")
+	assert any(b"T0:" in l for l in read_until(transport, b"T0:"))
 
 
 def test_failed_upload_releases_connection(transport, sim, tmp_path):

@@ -31,9 +31,10 @@ READY, BUILDING_FROM_SD = "READY", "BUILDING_FROM_SD"
 
 class FFCP2(object):
 	def __init__(self, sd_drive="1:", packet_size=64, heat_rate=50.0, print_rate=4096,
-				 control_timeout=None, require_control=True, garbage=b""):
+				 control_timeout=None, require_control=True, garbage=b"", sd_card=True):
 		"""
 		sd_drive        [fw] "1:/user/%s" is the only user path format string in the firmware
+		sd_card         False: no readable card in the printer; M28/M23 answer "Disk read error." [hw 2026-10-22]
 		packet_size     bytes returned per bulkRead, smaller than a response so partial reads happen
 		heat_rate       degrees C per second, high so tests are fast
 		print_rate      SD print progress in bytes per second
@@ -42,6 +43,9 @@ class FFCP2(object):
 		garbage         bytes prepended to the next response, to test non-ASCII handling
 		"""
 		self.sd_drive = sd_drive
+		self.sd_card = sd_card
+		self.stray_sd_bytes = 0  # file bytes that arrived with no open upload
+		self.wedged = False
 		self.packet_size = packet_size
 		self.heat_rate = heat_rate
 		self.print_rate = print_rate
@@ -103,7 +107,16 @@ class FFCP2(object):
 	def bulk_write(self, endpoint, data):
 		if self.disconnected:
 			raise usb1.USBErrorNoDevice()
+		if self.wedged:
+			raise usb1.USBErrorTimeout()
 		with self.lock:
+			if endpoint == SD_OUT and self.upload is None:
+				# [hw 2026-10-22] file bytes with no open upload go to the command parser (decompile: one OUT
+				# callback, no ~ filter); 8 KB of them left the real printer refusing USB writes until power-cycled
+				self.stray_sd_bytes += len(data)
+				if self.stray_sd_bytes > 128:  # [fw] the receive ring is 128 bytes
+					self.wedged = True
+				return len(data)
 			if endpoint == SD_OUT and self.upload is not None:
 				self.upload["data"] += bytes(data)
 			elif endpoint == CMD_OUT:
@@ -276,6 +289,8 @@ class FFCP2(object):
 		except (IndexError, ValueError):
 			# eg Marlin's "M28 name.gco" from OctoPrint 2.0's own streaming upload [guess: refused like a bad path]
 			size, path = 0, line.split(None, 1)[1].decode("utf-8", "replace") if b" " in line else ""
+		if not self.sd_card:
+			return self._reply(code, b"Disk read error.")  # [hw 2026-10-22]
 		if not path.startswith(self.sd_drive + "/user/"):
 			return self._reply(code, b"open failed, File: %s." % path.encode())  # [log] issue #78
 		self.upload = dict(path=path, size=size, data=b"")
@@ -283,13 +298,17 @@ class FFCP2(object):
 
 	def _M29(self, code, line, args):
 		up, self.upload = self.upload, None
-		if up is None or len(up["data"]) != up["size"]:
+		if up is None:
+			return self._reply(code, b"Done saving file.")  # [hw 2026-10-22] [fw] says so even with nothing open
+		if len(up["data"]) != up["size"]:
 			return self._reply(code, b"File error")  # [guess] [fw] string exists, trigger unknown
 		self.files[up["path"]] = up["data"]
 		self._reply(code, b"Done saving file.")  # [fw]
 
 	def _M23(self, code, line, args):
 		path = line.split(None, 1)[1].strip().decode("utf-8", "replace")
+		if not self.sd_card:
+			return self._reply(code, b"Disk read error.")  # [hw 2026-10-22]
 		if path not in self.files:
 			return self._reply(code, b"File open failed.")  # [fw]
 		self.sd = dict(path=path, pos=0, total=len(self.files[path]))

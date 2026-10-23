@@ -424,9 +424,15 @@ class FlashForgePlugin(octoprint.plugin.SettingsPlugin,
 					serial_obj.sendcommand(b"M140 S0")
 
 					ok, answer = serial_obj.sendcommand(b"M28 %d %s" % (file_size, remote_path.encode()), 5000)
-					if not ok or b"open failed" in answer:
+					# only "Writing to file" means the printer is receiving. Anything else ("open failed",
+					# "Disk read error." with no card) must stop here: file bytes sent with no file open are parsed as
+					# commands, and on a real Creator Pro 2 that wedged USB until the printer was power-cycled.
+					if not ok or b"Writing to file" not in answer:
 						error = "{}: {}".format(errormsg, answer)
-						errormsg += " - could not create file on printer SD card."
+						if b"Disk read error" in answer:
+							errormsg += " - the printer cannot read its SD card. Is a card inserted?"
+						else:
+							errormsg += " - could not create file on printer SD card."
 
 				if not error:
 					self._logger.debug("M28 file tx started")
