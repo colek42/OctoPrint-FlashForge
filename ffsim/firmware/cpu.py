@@ -9,11 +9,12 @@ Clock model: the simulated clock counts CPU cycles. Each executed instruction co
 events on that clock; the run loop executes exactly as many instructions as fit before the next
 event, so a timer interrupt is taken within one instruction of its due cycle.
 
-Exception model: hardware stacking is done in Python. On entry the 8-word frame is pushed to the
-current SP, the FP caller-saved registers are saved on a Python-side stack (the real core would
-lazily stack them in an extended frame), LR is set to a trampoline address and PC to the vector.
-Returning through the trampoline pops the frame. The core itself stays in thread mode, so IPSR
-reads 0 inside handlers (see docs: known gaps).
+Exception model: NVIC, SysTick, DWT and exception entry/return live in the native core (core.c,
+bound by native.py), checked at every basic-block boundary. On entry the 8-word frame is pushed
+to the current SP, the FP caller-saved registers are kept on the core's own stack (the real core
+would lazily stack them in an extended frame), LR is set to a trampoline address and PC to the
+vector. Returning through the trampoline pops the frame. The core itself stays in thread mode,
+so IPSR reads 0 inside handlers (see docs: known gaps).
 """
 
 import ctypes
@@ -22,15 +23,10 @@ import struct
 
 from unicorn import (UC_ARCH_ARM, UC_HOOK_CODE, UC_HOOK_MEM_INVALID, UC_MODE_MCLASS, UC_MODE_THUMB, Uc,
 					 UcError)
-from unicorn.arm_const import (UC_ARM_REG_BASEPRI, UC_ARM_REG_FPSCR, UC_ARM_REG_LR, UC_ARM_REG_PC,
-							   UC_ARM_REG_PRIMASK, UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
-							   UC_ARM_REG_R3, UC_ARM_REG_R12, UC_ARM_REG_S0, UC_ARM_REG_SP, UC_ARM_REG_XPSR,
-							   UC_CPU_ARM_CORTEX_M4)
+from unicorn.arm_const import (UC_ARM_REG_BASEPRI, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_PRIMASK,
+							   UC_ARM_REG_R0, UC_ARM_REG_SP, UC_CPU_ARM_CORTEX_M4)
 
 TRAMPOLINE = 0x0FFF0000  # exception-return landing pad; not a real STM32 address
-FRAME_REGS = (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R12, UC_ARM_REG_LR)
-FP_REGS = tuple(range(UC_ARM_REG_S0, UC_ARM_REG_S0 + 16))
-_ENTRY_READ = (UC_ARM_REG_SP,) + FRAME_REGS + (UC_ARM_REG_PC, UC_ARM_REG_XPSR) + FP_REGS + (UC_ARM_REG_FPSCR,)
 
 
 class _RegBatch(object):
@@ -76,14 +72,14 @@ class Register(object):
 
 class Machine(object):
 	def __init__(self, hz=168e6, cpi=1.0, flash_size=1 << 20, sram_size=128 << 10, ccm_size=64 << 10,
-				 native=True, bytes_per_instruction=2.6):
+				 bytes_per_instruction=2.6):
 		self.hz = float(hz)
 		self.cpi = float(cpi)
-		# Native block budget: cycles are estimated from executed code bytes. 2.6 bytes per
+		# Cycles are estimated from executed code bytes (native core, per basic block). 2.6 bytes per
 		# instruction is a GUESS for compiler-generated Thumb-2 (mix of 16- and 32-bit encodings).
 		self.cycles_per_byte = self.cpi / bytes_per_instruction
-		self._want_native = native
-		self.cycles = 0.0
+		self._cycles = 0.0
+		self._running = False
 		self.uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
 		self.uc.ctl_set_cpu_model(UC_CPU_ARM_CORTEX_M4)
 		self.flash_size, self.sram_size = flash_size, sram_size
@@ -113,27 +109,19 @@ class Machine(object):
 		self._skip_requested = False
 		self.skipped_cycles = 0.0
 		self.skip_log = None  # set to a collections.Counter() to record (pc, masked) per skip
-		self._exc_stack = []  # [(exc_number, fp_state)]
-		self.nvic = None  # set by attach_nvic
 		self.unmapped = []
 		self.stop_reason = None
-		self.uc.hook_add(UC_HOOK_CODE, self._exc_return, begin=TRAMPOLINE, end=TRAMPOLINE + 0xFFF)
 		self.uc.hook_add(UC_HOOK_MEM_INVALID, self._invalid)
 		self._bus_regions = []
 		self._mask_regs = _RegBatch(self.uc, (UC_ARM_REG_PRIMASK, UC_ARM_REG_BASEPRI))
-		self._entry_regs = _RegBatch(self.uc, _ENTRY_READ)
-		self._sp_reg = _RegBatch(self.uc, (UC_ARM_REG_SP,))
 		self._pc_reg = _RegBatch(self.uc, (UC_ARM_REG_PC,))
 		from unicorn.unicorn_py3.unicorn import uclib
 		self._uclib = uclib
-		self.budget = None
-		if self._want_native:
-			from .native import try_block_budget
-			self.budget = try_block_budget(self.uc)
-		self._enter_regs = _RegBatch(self.uc, (UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_R0,
-											   UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3))
-		self._return_regs = _RegBatch(self.uc, FRAME_REGS + (UC_ARM_REG_XPSR, UC_ARM_REG_SP) + FP_REGS +
-									  (UC_ARM_REG_FPSCR,))
+		from .native import Core
+		self.core = Core(self.uc)
+		self.lib = self.core.lib
+		self.lib.ffsim_set_cpb(self.cycles_per_byte)
+		self.nvic = None  # set by the SoC (scs.Nvic, a view of the native NVIC)
 
 	# ---- memory ------------------------------------------------------------------
 
@@ -225,6 +213,24 @@ class Machine(object):
 	# ---- time ----------------------------------------------------------------------
 
 	@property
+	def cycles(self):
+		"""The cycle clock, live while emulation runs (callbacks see the cycle they happen on)."""
+		if self._running:
+			return self.lib.ffsim_live()
+		return self._cycles
+
+	@cycles.setter
+	def cycles(self, value):
+		if self._running:
+			raise RuntimeError("the clock can only be moved between runs")
+		self._cycles = value
+
+	@property
+	def idle_cycles(self):
+		"""Cycles spent asleep in WFI (skipped, not emulated)."""
+		return self.lib.ffsim_idle()
+
+	@property
 	def now(self):
 		"""Simulated seconds since reset."""
 		return self.cycles / self.hz
@@ -243,12 +249,19 @@ class Machine(object):
 		address &= ~1
 		return self.uc.hook_add(UC_HOOK_CODE, lambda uc, a, s, u: callback(self), begin=address, end=address)
 
+	def add_wfi(self, address):
+		"""Treat the WFI instruction at `address` as a sleep until the next event.
+
+		The native hook takes a deliverable exception at once (returning just past the WFI, where
+		the hardware resumes). Otherwise it moves the clock to the next SysTick zero, the next
+		Python event or the end of the run, whichever is first. A Python event ends the run with
+		PC still on the WFI, so the event fires and the WFI is re-evaluated. Asleep costs nothing.
+		"""
+		self.core.add_wfi(address)
+
 	def request_stop(self):
-		"""Return to the run loop soon, after the current instruction retires (see native.py)."""
-		if self.budget is not None:
-			self.budget.stop_soon()
-		# In count= mode a stop from an MMIO write would replay the store, so the request is
-		# dropped and the run loop notices at the end of the chunk (<= max_chunk_s later).
+		"""Return to the run loop at the next basic-block boundary."""
+		self.lib.ffsim_stop_soon()
 
 	def return_from_function(self, r0=None):
 		"""For HLE hooks placed on a function entry: return to the caller with r0 as the result."""
@@ -261,87 +274,53 @@ class Machine(object):
 	def interrupts_masked(self):
 		return self._mask_regs.read()[0] & 1
 
-	def current_priority(self):
-		prio = 0x100
-		if self._exc_stack:
-			prio = self._exc_stack[-1][2]
-		basepri = self._mask_regs.read()[1] & 0xFF
-		if basepri:
-			prio = min(prio, basepri)
-		return prio
-
-	def enter_exception(self, number, priority, vector=None, args=None):
-		"""Stack a frame and branch to the handler. `vector` overrides the table (used for HLE calls)."""
-		vals = self._entry_regs.read()
-		sp = vals[0]
-		align = sp & 4
-		sp = (sp - 32 - align) & 0xFFFFFFFF
-		self.uc.mem_write(sp, struct.pack("<8I", *vals[1:9]))
-		self._exc_stack.append((number, (vals[9:], align), priority))
-		if vector is None:
-			vector = self.read32(self.nvic.vtor + 4 * number)
-		a = list(args or ()) + [0, 0, 0, 0]
-		self._enter_regs.write((sp, TRAMPOLINE | 1, vector | 1, a[0], a[1], a[2], a[3]))
-
-	def _exc_return(self, uc, address, size, user):
-		number, (fp, align), _ = self._exc_stack.pop()
-		sp = self._sp_reg.read()[0]
-		frame = struct.unpack("<8I", uc.mem_read(sp, 32))
-		self._return_regs.write(frame[:6] + (frame[7], (sp + 32 + align) & 0xFFFFFFFF) + tuple(fp))
-		uc.reg_write(UC_ARM_REG_PC, frame[6] | 1)  # separately: only reg_write redirects from a hook
-		if self.nvic is not None and (self.nvic.pending or self.nvic.hle_queue):
-			self.request_stop()  # tail-chain: let the run loop take the pending exception now
-
 	# ---- run loop ------------------------------------------------------------------
 
 	def reset(self, vtor):
 		sp, entry = self.read32(vtor), self.read32(vtor + 4)
 		self.uc.reg_write(UC_ARM_REG_SP, sp)
 		self.uc.reg_write(UC_ARM_REG_PC, entry | 1)
-		if self.nvic is not None:
-			self.nvic.vtor = vtor
+		self.lib.ffsim_set_vtor(vtor)
 
 	def run_until(self, cycle_target, max_chunk_s=20e-6):
 		"""Execute until the simulated clock reaches cycle_target, firing events on time."""
-		uc = self.uc
-		lib, uch, pc_reg = self._uclib, uc._uch, self._pc_reg
+		uc, lib = self.uc, self.lib
+		uclib, uch, pc_reg = self._uclib, uc._uch, self._pc_reg
 		events = self._events
-		while self.cycles < cycle_target:
-			while events and events[0][0] <= self.cycles:
+		inf = float("inf")
+		while self._cycles < cycle_target:
+			while events and events[0][0] <= self._cycles:
 				_, _, cb = heapq.heappop(events)
 				cb()
-			if self.nvic is not None and (self.nvic.pending or self.nvic.hle_queue):
-				self.nvic.deliver(self)
 			nxt = cycle_target
 			if events:
 				nxt = min(nxt, events[0][0])
 			pc = pc_reg.read()[0]
 			uc._hook_exception = None
-			if self.budget is not None:
-				want = max(2.0, min(nxt - self.cycles, max_chunk_s * self.hz) / self.cycles_per_byte)
-				self.budget.set(want)
-				err = lib.uc_emu_start(uch, pc | 1, 0, 0, 0)
-				spent = (want - self.budget.remaining() - self.budget.take_stolen()) * self.cycles_per_byte
-			else:
-				count = max(1, int(min(nxt - self.cycles, max_chunk_s * self.hz) / self.cpi))
-				err = lib.uc_emu_start(uch, pc | 1, 0, 0, count)
-				spent = count * self.cpi
+			want = max(2, int(min(nxt - self._cycles, max_chunk_s * self.hz) / self.cycles_per_byte))
+			lib.ffsim_run_begin(self._cycles, want, cycle_target, events[0][0] if events else inf)
+			self._running = True
+			try:
+				err = uclib.uc_emu_start(uch, pc | 1, 0, 0, 0)
+			finally:
+				self._running = False
+				self._cycles = lib.ffsim_run_end()
 			if err:
 				self.stop_reason = "%s at pc=%08x" % (UcError(err), uc.reg_read(UC_ARM_REG_PC))
 				raise UcError(err)
 			if uc._hook_exception is not None:
 				raise uc._hook_exception
-			self.cycles += max(spent, self.cpi)
 			if self._skip_requested:
 				self._skip_requested = False
 				self._poll_count = 0
-				jump = min(nxt, self.cycles + self.poll_skip_max * self.hz) - self.cycles
+				limit = min(nxt, lib.ffsim_systick_due())
+				jump = min(limit, self._cycles + self.poll_skip_max * self.hz) - self._cycles
 				# With interrupts masked a jump could swallow a second timer tick that real code
 				# would have taken right after re-enabling them, so only skip when unmasked.
 				if self.skip_log is not None:
 					self.skip_log[(uc.reg_read(UC_ARM_REG_PC), self.interrupts_masked())] += 1
-				if jump > 0 and not self.interrupts_masked() and not (self.nvic and self.nvic.pending):
-					self.cycles += jump
+				if jump > 0 and not self.interrupts_masked() and not lib.ffsim_pending_any():
+					self._cycles += jump
 					self.skipped_cycles += jump
 
 	def run_for(self, seconds, **kw):

@@ -143,6 +143,7 @@ class PlantParams:
 	filament_heat_capacity: float = 1.80  # J/g/K, Kalico default
 	dt_motion: float = 20e-6  # s, integration step (stiffest mode ~300 Hz)
 	accel_rate: float = 3200.0  # Hz, ADXL345 capture rate used by Klipper
+	carriage_min_gap: float = 38.0  # mm between the two X carriages before they touch. Klipper PR #6553 dual_carriage safe_distance
 
 	@classmethod
 	def load(cls, path):
@@ -451,6 +452,8 @@ class Plant(object):
 		self.axes = {k: Axis(v, self.params.motor, self) for k, v in self.params.axes.items()}
 		self.t = 0.0
 		self.accel_capture = None  # list of (t, ax, ay, az) in mm/s^2 while capturing
+		self.collisions = 0  # times the X carriages came closer than carriage_min_gap (not stopped)
+		self._touching = False
 		self._accel_next = 0.0
 		self._accel_axes = None
 
@@ -463,6 +466,11 @@ class Plant(object):
 				ax.advance(t)
 			for h in self.heaters.values():
 				h.step(self.t, t)
+			gap = self.axes["x0"].position - self.axes["x1"].position
+			touching = gap < self.params.carriage_min_gap
+			if touching and not self._touching:
+				self.collisions += 1
+			self._touching = touching
 			self.t = t
 
 	def board_temp(self):

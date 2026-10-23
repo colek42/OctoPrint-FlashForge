@@ -58,17 +58,23 @@ def take_control(fw):
 
 
 def wait_idle(fw, seconds):
-	"""Wait for MoveMode READY, polling M119 (which also keeps host control alive)."""
+	"""Wait until motion has really finished, polling M119 (which also keeps host control alive).
+
+	MoveMode READY alone is not enough: the stock firmware clears MOVING once the planner has
+	taken a block, while the steppers are still running. So also require an empty planner ring
+	(fw.motion_idle()) and no step edge on any axis for a full second."""
 	end = fw.now + seconds
-	ready_since = None
+	quiet_since = None
 	while fw.now < end:
+		steps = sum(a.steps for a in fw.plant.axes.values())
 		reply = command(fw, b"M119", 0.5, until=b"ok\r\n")
-		if b"MoveMode: READY" in reply:
-			ready_since = ready_since or fw.now
-			if fw.now - ready_since > 1.0:
+		moved = sum(a.steps for a in fw.plant.axes.values()) != steps
+		if b"MoveMode: READY" in reply and fw.motion_idle() and not moved:
+			quiet_since = quiet_since or fw.now
+			if fw.now - quiet_since > 1.0:
 				return True
 		else:
-			ready_since = None
+			quiet_since = None
 	return False
 
 
@@ -151,7 +157,9 @@ def test_g28_homes_on_the_endstops(fw):
 	for name, at in (("x0", 236.0), ("x1", -38.0), ("y", -3.0), ("z", -4.0)):
 		assert abs(ax[name].position - at) < 0.2, (name, ax[name].position)
 		assert ax[name].endstop_triggered(), name
-	# and the firmware's reported position is that same physical point in its own frame
+	# and the firmware's reported position is that same physical point in its own centred frame
+	# (X needs the settings EEPROM model: with an erased part the X frame is garbage)
+	assert abs(pos["X"] - (ax["x0"].position - 99.0)) < 0.1, (pos, ax["x0"].position)
 	assert abs(pos["Y"] - (ax["y"].position - 75.0)) < 0.1, (pos, ax["y"].position)
 	assert abs(pos["Z"] - ax["z"].position) < 0.1, (pos, ax["z"].position)
 
@@ -162,8 +170,9 @@ def _home_and_center(fw):
 	take_control(fw)
 	command(fw, b"G28", until=b"ok\n")
 	assert wait_idle(fw, 90)
-	command(fw, b"G1 X-60 F3000", until=b"ok\n")  # stock frame after an erased-EEPROM home: X0 = right end
+	command(fw, b"G1 X40 F3000", until=b"ok\n")  # stock centred frame: X40 is machine 139
 	assert wait_idle(fw, 30)
+	assert abs(fw.plant.axes["x0"].position - 139.0) < 0.1
 
 
 def _move(fw, line):
@@ -177,16 +186,39 @@ def _move(fw, line):
 
 def test_gentle_move_keeps_every_step(fw):
 	_home_and_center(fw)
-	lost, ferr = _move(fw, b"G1 X-160 F3000")  # 50 mm/s
+	lost, ferr = _move(fw, b"G1 X-20 F3000")  # 60 mm at 50 mm/s, clear of the parked left carriage
 	assert lost == 0, (lost, ferr)
+	assert abs(fw.plant.axes["x0"].position - 79.0) < 0.1
 
 
 @pytest.mark.xfail(strict=True, reason="stock firmware caps X at ~286 mm/s whatever F asks for, below the "
 										 "guessed motor's stall edge; needs a test that loads the axis another way")
 def test_300mm_s_move_skips(fw):
 	_home_and_center(fw)
-	lost, ferr = _move(fw, b"G1 X-200 F18000")  # 300 mm/s requested
+	lost, ferr = _move(fw, b"G1 X120 F18000")  # 300 mm/s requested, 80 mm toward the right end
 	assert lost != 0, (lost, ferr)
+
+
+@pytest.mark.parametrize("select", [b"M108 T1", b"M110 T1"])
+def test_tool_select_switches_carriage_without_parking(fw, select):
+	"""From the host, M108 T1 and M110 T1 only re-route X steps to the left carriage
+	(FUN_0801177a cases 0x6c/0x6e -> FUN_080113ec). Neither carriage moves on the select itself,
+	the next X move drives only the left carriage, and nothing parks the right one: the park and
+	unpark scripts 0xF/0x10 run only from SD files whose M118 declared two tools (FUN_0801287a).
+	Regression for the twin bug where an erased settings EEPROM (NaN T1 offsets) froze motion."""
+	_home_and_center(fw)
+	ax = fw.plant.axes
+	x0, x1 = ax["x0"].position, ax["x1"].position
+	command(fw, select, until=b"ok\n")
+	assert wait_idle(fw, 10)
+	assert (ax["x0"].position, ax["x1"].position) == (x0, x1)
+	assert fw.ram(0x20000043)[0] == 1 and fw.ram(0x20000002)[0] == 1 and fw.ram(0x20000001)[0] == 0
+	command(fw, b"G1 X-30 F3000", until=b"ok\n")
+	assert wait_idle(fw, 30)
+	assert ax["x0"].position == x0
+	assert abs(ax["x1"].position - (-30 + 99.0)) < 0.1
+	# the firmware does not keep the carriages apart; here they stay 70 mm apart, so no contact
+	assert fw.collisions == 0
 
 
 def test_steps_per_mm_agree_with_klipper_config(fw):

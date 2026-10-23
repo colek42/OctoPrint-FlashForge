@@ -160,6 +160,12 @@ class FirmwareFFCP2(object):
 					  [ax["x1"].position - 99.0, ax["y"].position - 75.0, ax["z"].position]]
 		self.following_error_max = {k: a.following_error_max for k, a in ax.items()}
 		self.lost_steps = {k: a.lost_steps for k, a in ax.items()}
+		self.collisions = self.plant.collisions
+
+	def motion_idle(self):
+		"""True when the firmware's motion planner has nothing left to execute."""
+		with self.lock:
+			return self.fw.planner_empty()
 
 	@property
 	def received(self):
@@ -174,16 +180,22 @@ class FirmwareFFCP2(object):
 			return bytes(self.m.uc.mem_read(addr, n))
 
 	def _emit_path(self):
-		"""Append a segment per carriage when it has moved, from the physical (ringing) position."""
-		ax = self.plant.axes
-		z = ax["z"].position
-		for idx, (xname, ename) in enumerate((("x0", "e0"), ("x1", "e1"))):
-			cur = (ax[xname].position - 99.0, ax["y"].position - 75.0, z, ax[ename].position)
-			last = self._last_seg.get(idx)
-			if last is None:
-				self._last_seg[idx] = cur
-				continue
-			if abs(cur[0] - last[0]) + abs(cur[1] - last[1]) + abs(cur[2] - last[2]) >= 0.2:
-				extruding = cur[3] > last[3] + 1e-4
-				self.path.append(last[:3] + cur[:3] + (idx, extruding))
-				self._last_seg[idx] = cur
+		emit_path(self.plant, self._last_seg, self.path)
+
+
+def emit_path(plant, last_seg, path):
+	"""Append a viewer segment per carriage when it has moved, from the physical (ringing) position.
+
+	Viewer frame: centre origin, i.e. the Klipper machine frame shifted by (99, 75)."""
+	ax = plant.axes
+	z = ax["z"].position
+	for idx, (xname, ename) in enumerate((("x0", "e0"), ("x1", "e1"))):
+		cur = (ax[xname].position - 99.0, ax["y"].position - 75.0, z, ax[ename].position)
+		last = last_seg.get(idx)
+		if last is None:
+			last_seg[idx] = cur
+			continue
+		if abs(cur[0] - last[0]) + abs(cur[1] - last[1]) + abs(cur[2] - last[2]) >= 0.2:
+			extruding = cur[3] > last[3] + 1e-4
+			path.append(last[:3] + cur[:3] + (idx, extruding))
+			last_seg[idx] = cur

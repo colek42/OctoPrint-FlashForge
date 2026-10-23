@@ -46,6 +46,7 @@ POSITION = 0x20000FF4  # X Y Z A B floats, commanded
 HEATERS = {"T0": 0x20001E40, "T1": 0x20001EEC, "B": 0x20001F98}  # +0x24 int16 current, +0x5C target
 IDEX_MODE = 0x20000013
 IDEX_DUAL = 0x20000008
+PLANNER_HEAD, PLANNER_TAIL = 0x200005B1, 0x200005B2  # FUN_08029b72: planner ring empty when equal
 AXIS_TABLE = 0x2000A29C  # 0x30 per axis, +4 float steps/mm (read for the docs, not used)
 
 
@@ -150,6 +151,9 @@ class StockAdapter(object):
 	def table_string(self, table, index):
 		raw = bytes(self.m.uc.mem_read(table + 0x11 * index, 0x11))
 		return raw.split(b"\0")[0].decode("ascii", "replace")
+
+	def planner_empty(self):
+		return self.u8(PLANNER_HEAD) == self.u8(PLANNER_TAIL)
 
 	def state(self):
 		u8 = self.u8

@@ -6,9 +6,11 @@ BrennerLu's CubeMX export names the part STM32F417ZGTx; the F417 only adds the c
 blocks, which neither firmware is known to use, so the F407 map serves for both.
 """
 
+import struct
+
 from .cpu import Machine, Register
 from .periph import Adc, Dma, Gpio, OtgFs, Pwr, Rcc, Spi, Timer, Usart
-from .scs import Dwt, Scs
+from .scs import Nvic
 
 HCLK = 168e6
 APB1_TIMER = 84e6  # APB1 = HCLK/4, timer clock x2 (RM0090 6.2)
@@ -42,7 +44,12 @@ class Stm32f4(object):
 		m.map_bus(0x40000000, 0x80000)
 		m.map_bus(0x50000000, 0x61000)
 		m.map_bus(0xA0000000, 0x1000)
-		m.map_bus(0xE0000000, 0x100000)
+		# Private peripheral bus: the SCS page (NVIC/SCB/SysTick) and the DWT page are native
+		# (core.c); the rest of the PPB is a plain Python window.
+		m.map_bus(0xE0000000, 0x1000)
+		m.map_bus(0xE0002000, 0xC000)
+		m.map_bus(0xE000F000, 0xF1000)
+		m.core.map_scs()
 		m.map_bitband(0x42000000, 0x40000000, 0x80000)  # peripheral bit-band
 		m.map_bitband(0x22000000, 0x20000000, 0x20000)  # SRAM bit-band
 		# FSMC banks (LCD, external memories): plain memory so pixel writes cost nothing
@@ -51,10 +58,8 @@ class Stm32f4(object):
 		m.uc.mem_map(0x68000000, 0x01000000)
 		m.uc.mem_map(0x6C000000, 0x01000000)
 
-		self.scs = Scs(m)
-		self.nvic = self.scs.nvic
-		m.attach(0xE000E000, 0x1000, self.scs)
-		m.attach(0xE0001000, 0x1000, Dwt(m))
+		self.nvic = m.nvic = Nvic(m)
+		m.attach(0xE0000000, 0x100000, Register("PPB"))
 		self.rcc = Rcc()
 		m.attach(0x40023800, 0x400, self.rcc)
 		m.attach(0x40007000, 0x400, Pwr("PWR"))
@@ -76,6 +81,15 @@ class Stm32f4(object):
 		m.attach(0x40026000, 0x400, self.dma1)
 		m.attach(0x40026400, 0x400, self.dma2)
 		self.adc.dma = lambda: self.dma2.stream(0)  # ADC1 -> DMA2 stream 0 (RM0090 table 43)
+		# Factory calibration in system memory (DS8626 section 6.3.22/6.3.23 addresses). Real
+		# parts differ per chip; these are datasheet-typical: V25 = 0.76 V, slope 2.5 mV/C,
+		# VREFINT 1.21 V, read at VDDA = 3.3 V. Klipper's temperature_mcu divides by CAL110 - CAL30.
+		self.die_temp = lambda: 30.0  # the board replaces this with its own estimate
+		ts = lambda t: int(round((0.76 + (t - 25.0) * 0.0025) / 3.3 * 4095))
+		vref = int(round(1.21 / 3.3 * 4095))
+		m.uc.mem_write(0x1FFF7A2A, struct.pack("<HHH", vref, ts(30.0), ts(110.0)))
+		self.adc.channels[16] = lambda: ts(self.die_temp())  # internal temperature sensor
+		self.adc.channels[17] = lambda: vref  # VREFINT
 		self.spi = {}
 		for name, base in SPIS.items():
 			self.spi[name] = Spi(m, name)

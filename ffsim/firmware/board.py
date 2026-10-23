@@ -9,7 +9,7 @@ Firmware-independent: this is copper, not code. Sources, cross-checked where bot
 Disagreements are listed in docs/ffsim-firmware-backend.md.
 """
 
-from .devices import Ads1118
+from .devices import Ads1118, I2cEeprom
 from .plant import ntc_resistance, type_k_microvolts
 
 # axis: (step pin, step inverted, dir pin, dir inverted, enable pin, enable inverted)   [K], labels [B]
@@ -59,9 +59,31 @@ class PinTimeAverage(object):
 		return h / (t1 - t0) if t1 > t0 else float(self.level)
 
 
+EEPROM_SDA, EEPROM_SCL, EEPROM_ADDRESS = "PG3", "PG4", 0x50  # [fw] bit-banged 0xA0 (FUN_0801b306); [B] labels PG3/PG4 "EEPROM"
+
+
+def default_eeprom():
+	"""Settings EEPROM contents for a printer we have never read. GUESS: all zero, which the
+	stock firmware reads as zero T1 nozzle offsets (EEPROM 0x00/0x04/0x08, floats) instead of
+	the NaN an erased (0xFF) part gives, plus a machine name at 0x40 (0x22 bytes). Replace with
+	a dump of the real chip (FFSIM_EEPROM=path) when one exists."""
+	img = bytearray(256)
+	name = b"FFCP2-SIM"
+	img[0x40:0x40 + len(name)] = name
+	return bytes(img)
+
+
 class Board(object):
-	def __init__(self, soc, plant):
+	def __init__(self, soc, plant, eeprom=None):
 		self.soc, self.plant, self.m = soc, plant, soc.m
+		if eeprom is None:
+			import os
+			path = os.environ.get("FFSIM_EEPROM")
+			eeprom = open(path, "rb").read() if path else default_eeprom()
+		# 2-byte word addresses: the stock firmware sends A0 00 <addr> (observed); size GUESS 24C32
+		self.eeprom = I2cEeprom(soc.pin(EEPROM_SDA), soc.pin(EEPROM_SCL), EEPROM_ADDRESS, eeprom,
+								size=4096, addr_bytes=2)
+		soc.die_temp = plant.board_temp  # MCU die sits on the same board as the ADS1118
 		self._wire_steppers()
 		self._wire_endstops()
 		self._wire_heaters()
